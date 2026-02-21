@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>📁 Repo Image Gallery · lazy thumbnails</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #121212;
+            font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+            padding: 2rem 1.5rem;
+            color: #eee;
+        }
+
+        h1 {
+            font-weight: 500;
+            font-size: 2rem;
+            letter-spacing: -0.5px;
+            margin-bottom: 1.5rem;
+            border-left: 5px solid #bb86fc;
+            padding-left: 1.2rem;
+        }
+
+        .sub {
+            color: #aaa;
+            margin-bottom: 2rem;
+            font-size: 0.95rem;
+            background: #1e1e1e;
+            padding: 0.75rem 1.5rem;
+            border-radius: 2rem;
+            display: inline-block;
+        }
+
+        .gallery-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+            gap: 1.5rem;
+        }
+
+        .thumb-card {
+            background: #1e1e1e;
+            border-radius: 16px;
+            overflow: hidden;
+            box-shadow: 0 8px 20px rgba(0, 0, 0, 0.6);
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+            aspect-ratio: 1 / 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+            border: 1px solid #2c2c2c;
+        }
+
+        .thumb-card:hover {
+            transform: scale(1.02);
+            box-shadow: 0 12px 28px rgba(187, 134, 252, 0.3);
+            border-color: #bb86fc;
+        }
+
+        .thumb-card a {
+            display: block;
+            width: 100%;
+            height: 100%;
+            text-decoration: none;
+        }
+
+        .thumb-img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            display: block;
+            background: #2a2a2a;      /* placeholder while loading */
+            transition: opacity 0.3s ease;
+            opacity: 0;                 /* hidden until loaded */
+        }
+
+        .thumb-img.loaded {
+            opacity: 1;
+        }
+
+        /* subtle loading indicator (blur pulse) */
+        .thumb-card::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.03), transparent);
+            animation: shimmer 1.5s infinite;
+            pointer-events: none;
+            z-index: 1;
+            opacity: 0;
+        }
+
+        .thumb-card.loading::after {
+            opacity: 1;
+        }
+
+        @keyframes shimmer {
+            0% { transform: translateX(-100%); }
+            100% { transform: translateX(100%); }
+        }
+
+        .message-box {
+            background: #1e1e1e;
+            border-radius: 24px;
+            padding: 3rem 2rem;
+            text-align: center;
+            border: 1px dashed #444;
+            margin: 3rem 0;
+        }
+
+        .message-box p {
+            margin: 0.8rem 0;
+            color: #bbb;
+        }
+
+        .badge {
+            background: #2c2c2c;
+            color: #bb86fc;
+            padding: 0.4rem 1rem;
+            border-radius: 40px;
+            font-family: monospace;
+            font-size: 0.9rem;
+            display: inline-block;
+            margin-top: 1rem;
+        }
+
+        footer {
+            margin-top: 4rem;
+            font-size: 0.8rem;
+            color: #666;
+            text-align: center;
+            border-top: 1px solid #2a2a2a;
+            padding-top: 2rem;
+        }
+    </style>
+</head>
+<body>
+    <h1>📸 Repo image stream</h1>
+    <div class="sub" id="status-label">🔍 detecting environment ...</div>
+
+    <div class="gallery-grid" id="gallery"></div>
+
+    <!-- fallback / info area (hidden by default) -->
+    <div id="messageArea" class="message-box" style="display: none;">
+        <p>✨ Could not auto‑detect images from this repository path.</p>
+        <p>If you are on <strong>GitHub Pages</strong> (username.github.io/repo/...), the gallery should appear automatically.</p>
+        <p>Otherwise, you can manually list image filenames inside the script (see comment in code).</p>
+        <span class="badge">📁 make sure images are committed in the same folder</span>
+    </div>
+
+    <footer>
+        ⚡ lazy thumbnails · fetched directly from current repo directory (GitHub API)
+    </footer>
+
+    <script>
+        (function() {
+            // ----- configuration -----
+            const ALLOWED_EXT = new Set(['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg', 'avif']);
+            const GITHUB_API_BASE = 'https://api.github.com/repos';
+
+            // DOM elements
+            const galleryEl = document.getElementById('gallery');
+            const statusEl = document.getElementById('status-label');
+            const messageBox = document.getElementById('messageArea');
+
+            // state
+            let imageList = [];
+
+            // helper: show status
+            function setStatus(msg, isWarning = false) {
+                statusEl.textContent = msg;
+                if (isWarning) statusEl.style.color = '#cf6679';
+                else statusEl.style.color = '#aaa';
+            }
+
+            // helper: extract owner/repo/path from github.io URL
+            function extractGitHubInfoFromUrl() {
+                try {
+                    const url = new URL(window.location.href);
+                    const host = url.hostname;
+
+                    // only handle *.github.io domains
+                    if (!host.endsWith('github.io')) {
+                        return null;
+                    }
+
+                    const username = host.split('.')[0];  // owner
+                    const pathParts = url.pathname.split('/').filter(p => p.length > 0);
+                    if (pathParts.length === 0) return null;
+
+                    const repo = pathParts[0];            // first segment is repo name
+                    // remaining part is the path inside the repo (including current file)
+                    const fullRepoPath = pathParts.slice(1).join('/');
+                    // remove the filename part to get the directory
+                    const lastSlashIndex = fullRepoPath.lastIndexOf('/');
+                    const directory = lastSlashIndex >= 0 ? fullRepoPath.substring(0, lastSlashIndex + 1) : '';  // keep trailing slash? API works with or without
+
+                    return {
+                        owner: username,
+                        repo: repo,
+                        path: directory   // empty string means root
+                    };
+                } catch (e) {
+                    console.warn('URL parsing failed', e);
+                    return null;
+                }
+            }
+
+            // build GitHub API contents URL
+            function buildApiUrl(info) {
+                // encode path components, but keep slashes
+                const pathEncoded = info.path.split('/').map(seg => encodeURIComponent(seg)).join('/');
+                const base = `${GITHUB_API_BASE}/${info.owner}/${info.repo}/contents/${pathEncoded}`;
+                // remove trailing slash if any (API accepts both, but clean)
+                return base.replace(/\/$/, '');
+            }
+
+            // check if file is image by extension
+            function isImage(filename) {
+                const ext = filename.split('.').pop().toLowerCase();
+                return ALLOWED_EXT.has(ext);
+            }
+
+            // fetch images via GitHub API
+            async function fetchImagesFromGitHub(info) {
+                const apiUrl = buildApiUrl(info);
+                setStatus(`📡 fetching from GitHub … (${info.owner}/${info.repo}/${info.path || ''})`);
+
+                try {
+                    const response = await fetch(apiUrl, {
+                        headers: { 'Accept': 'application/vnd.github.v3+json' }
+                    });
+
+                    if (!response.ok) {
+                        let errorMsg = `GitHub API error ${response.status}`;
+                        if (response.status === 403) {
+                            errorMsg += ' – rate limit? try later';
+                        } else if (response.status === 404) {
+                            errorMsg += ' – folder not found (or repo private)';
+                        }
+                        throw new Error(errorMsg);
+                    }
+
+                    const data = await response.json();
+                    if (!Array.isArray(data)) {
+                        // if it's a single file (unlikely) or weird response
+                        throw new Error('response is not a directory listing');
+                    }
+
+                    // filter only image files
+                    const images = data.filter(item => item.type === 'file' && isImage(item.name));
+                    if (images.length === 0) {
+                        setStatus('🖼️ No image files found in this directory', true);
+                        messageBox.style.display = 'block';
+                        return [];
+                    }
+
+                    setStatus(`✅ found ${images.length} image(s) — lazy loading`);
+                    messageBox.style.display = 'none';   // hide fallback message
+                    return images.map(img => ({
+                        name: img.name,
+                        url: img.download_url,            // raw github url
+                        thumbnail: img.download_url,       // we can use raw as thumbnail (github serves resized if needed)
+                        html_url: img.html_url             // github page (optional)
+                    }));
+                } catch (error) {
+                    console.error('GitHub fetch error:', error);
+                    setStatus(`⚠️ ${error.message}`, true);
+                    messageBox.style.display = 'block';
+                    return [];
+                }
+            }
+
+            // ---- lazy loading with IntersectionObserver ----
+            function initLazyLoading() {
+                const observer = new IntersectionObserver((entries) => {
+                    entries.forEach(entry => {
+                        if (entry.isIntersecting) {
+                            const img = entry.target.querySelector('.thumb-img');
+                            const card = entry.target;
+                            if (img && img.dataset.src) {
+                                const src = img.dataset.src;
+                                // remove data-src to avoid double loading
+                                delete img.dataset.src;
+
+                                // show loading shimmer on card
+                                card.classList.add('loading');
+
+                                // set src and handle load/error
+                                img.src = src;
+                                img.onload = () => {
+                                    img.classList.add('loaded');
+                                    card.classList.remove('loading');
+                                };
+                                img.onerror = () => {
+                                    // mark as broken (optional)
+                                    img.alt = '❌ failed';
+                                    img.style.background = '#331111';
+                                    card.classList.remove('loading');
+                                    console.warn('failed to load:', src);
+                                };
+                            }
+                            observer.unobserve(entry.target); // stop observing once loaded
+                        }
+                    });
+                }, {
+                    rootMargin: '200px',   // start loading a bit earlier
+                    threshold: 0.01
+                });
+
+                // observe all thumb cards
+                document.querySelectorAll('.thumb-card').forEach(card => observer.observe(card));
+            }
+
+            // render thumbnails (skeletons with data-src)
+            function renderGallery(images) {
+                if (!images.length) {
+                    galleryEl.innerHTML = ''; // empty, message already shown
+                    return;
+                }
+
+                const fragment = document.createDocumentFragment();
+                images.forEach(img => {
+                    const card = document.createElement('div');
+                    card.className = 'thumb-card loading';  // start with loading shimmer
+
+                    const link = document.createElement('a');
+                    link.href = img.url;           // direct link to raw image
+                    link.target = '_blank';         // open in new tab (optional)
+                    link.rel = 'noopener noreferrer';
+
+                    const imageEl = document.createElement('img');
+                    imageEl.className = 'thumb-img';
+                    imageEl.alt = img.name;
+                    imageEl.dataset.src = img.url;   // store actual src
+                    // very low placeholder? we rely on background color
+
+                    link.appendChild(imageEl);
+                    card.appendChild(link);
+                    fragment.appendChild(card);
+                });
+
+                galleryEl.appendChild(fragment);
+
+                // after cards are in DOM, start observing them
+                initLazyLoading();
+            }
+
+            // ---- manual override / fallback: if you want to list images manually, uncomment and edit below ----
+            /*
+            const MANUAL_IMAGE_LIST = [
+                "photo1.jpg",
+                "image2.png",
+                "background.webp"
+            ];
+            // then build array of { url: "same directory as this file/" + name } 
+            // but note: you need to know they're in same folder.
+            // this is a fallback only. We'll skip for now.
+            */
+
+            // ---- bootstrap ----
+            (async function main() {
+                // 1. try to get GitHub info from URL
+                const ghInfo = extractGitHubInfoFromUrl();
+
+                if (!ghInfo) {
+                    setStatus('🌐 Not on GitHub Pages — automatic repo scan unavailable', true);
+                    messageBox.style.display = 'block';
+                    // optional: you can still try to fetch a hardcoded list or show manual instruction
+                    return;
+                }
+
+                // 2. fetch images from GitHub
+                const images = await fetchImagesFromGitHub(ghInfo);
+                imageList = images;
+
+                // 3. render thumbnails (or show empty)
+                renderGallery(imageList);
+
+                // 4. if we got zero images but no error, fallback message already shown inside fetch
+            })();
+
+            // extra: if you are testing locally and still want to see something, you can add a manual array above
+            // and call renderGallery on that array (commented out).
+        })();
+    </script>
+
+    <!-- note: The script automatically works when this file is placed inside a public GitHub repository
+         and viewed via github.io (GitHub Pages). It uses the GitHub REST API to list files in the same folder. 
+         All common image extensions are supported. Lazy loading via IntersectionObserver makes scrolling smooth. -->
+</body>
+</html>
